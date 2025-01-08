@@ -7,7 +7,7 @@
 Проект представляет собой мобильное приложения для просмотра героев киновселенной Marvel. Основные функциональности включают в себя: просмотр всех имеющихся персонажей Марвел, а также детализированной информации по ним через открытое API Marvel.
 
 ## Галерея
-<img src="https://github.com/ivn-srg/prtf-marvel/blob/main/Simulator%20Screenshot%20-%20iPhone%2016%20Pro%20-%202024-11-05%20at%2018.56.12.gif" alt="main screen" width="250">
+<img src="https://github.com/ivn-srg/prtf-marvel/blob/main/Simulator%20Screen%20Recording%20-%20iPhone%2016%20Pro%20-%202025-01-08%20at%2022.32.21.gif" alt="main screen" width="250">
 
 ## Моя роль в проекте
 
@@ -30,7 +30,7 @@
 
 
 ## Принципы и инструменты разработки
-- Система контроля версий: Github
+- Система контроля версий: Git
 - IDE: Xcode
 
 ## Код: Предпросмотр
@@ -42,22 +42,37 @@
   
   ```swift
   import Foundation
-  import Alamofire
   import CryptoKit
-  import Kingfisher
   import RealmSwift
   import UIKit
   
   protocol ApiServiceProtocol: AnyObject {
-      func fetchHeroesData(from offset: Int, completion: @escaping (Result<Heroes, Error>) -> Void)
-      func fetchHeroData(heroItem: HeroRO, completion: @escaping (Result<HeroModel, Error>) -> Void)
-      func getImageForHero(url: String, imageView: UIImageView)
+      func performRequest<T: Decodable>(
+          from urlString: String,
+          modelType: T.Type
+      ) async throws -> T
+      
+      func makeHTTPRequest<T: Decodable>(
+          for request: URLRequest,
+          codableModelType: T.Type
+      ) async throws -> T
+      
+      func getImage(url: String) async throws -> UIImage
+      
+      func urlString(endpoint: APIType, offset: Int?, entityId: Int?, finalURL: String?) throws -> String
+  }
+  
+  enum HTTPMethod: String {
+      case get = "GET"
+      case post = "POST"
+      case patch = "PATCH"
+      case delete = "DELETE"
   }
   
   enum APIType {
-      
-      case getHeroes
-      case getHero
+      case getHeroes, getHero, getComics, getOneComics, getSeries, getOneSeries,
+           getStories, getStory, getCreators, getCreator, getEvents, getEvent,
+           finalURL, clearlyURL
       
       private var baseURL: String {
           "https://gateway.marvel.com/v1/public/"
@@ -65,8 +80,13 @@
       
       private var path: String {
           switch self {
-          case .getHeroes: "characters"
-          case .getHero: "characters"
+          case .getHeroes, .getHero: "characters"
+          case .getComics, .getOneComics: "comics"
+          case .getSeries, .getOneSeries: "series"
+          case .getStories, .getStory: "stories"
+          case .getCreators, .getCreator: "creators"
+          case .getEvents, .getEvent: "events"
+          case .finalURL, .clearlyURL: ""
           }
       }
       
@@ -76,24 +96,8 @@
   }
   
   enum HeroError: Error, LocalizedError {
-      
-      case unknown
-      case invalidURL
-      case invalidUserData
-      case custom(description: String)
-      
-      var errorDescription: String? {
-          switch self {
-          case .invalidUserData:
-              return "This is an invalid data. Please try again."
-          case .invalidURL:
-              return "Invalid url, man"
-          case .unknown:
-              return "Hey, this is an unknown error!"
-          case .custom(let description):
-              return description
-          }
-      }
+      case invalidURL, parsingError(Error), serializationError(Error), noInternetConnection, timeout,
+           otherNetworkError(Error), notFoundEntity, cashingFailed(Error), unexpectedData, parsingFailureModelError(Error)
   }
   
   final class ApiServiceConfiguration {
@@ -117,8 +121,8 @@
   }
   
   final class APIManager: ApiServiceProtocol {
-      
       public static let shared = APIManager()
+      
       private var currentTimeStamp: Int {
           Int(Date().timeIntervalSince1970)
       }
@@ -126,160 +130,131 @@
           MD5(string: "\(currentTimeStamp)\(PRIVATE_KEY)\(API_KEY)")
       }
       
-      func fetchHeroesData(from offset: Int, completion: @escaping (Result<Heroes, Error>) -> Void) {
+      func urlString(endpoint: APIType, offset: Int? = nil, entityId: Int? = nil, finalURL: String? = nil) throws -> String {
           let limit = 30
-          let path = "\(APIType.getHeroes.request)?limit=\(limit)&offset=\(offset)&ts=\(currentTimeStamp)&apikey=\(API_KEY)&hash=\(md5Hash)"
-          let urlString = String(format: path)
           
-          AF.request(urlString)
-              .validate()
-              .responseDecodable(of: ResponseModel.self, queue: .global(), decoder: JSONDecoder()) { (response) in
-                  switch response.result {
-                  case .success(let heroesData):
-                      completion(.success(heroesData.data.results))
-                      break
-                  case .failure(let error):
-                      
-                      if let err = self.getHeroError(error: error, data: response.data) {
-                          completion(.failure(err))
-                      } else {
-                          completion(.failure(error))
-                      }
-                      
-                      break
-                  }
-              }
+          switch endpoint {
+          case .getHeroes, .getComics, .getCreators, .getEvents, .getSeries, .getStories:
+              guard let offset = offset else { throw HeroError.invalidURL }
+              return "\(endpoint.request)?limit=\(limit)&offset=\(offset)&ts=\(currentTimeStamp)&apikey=\(API_KEY)&hash=\(md5Hash)"
+          case .getHero, .getEvent, .getStory, .getOneComics, .getOneSeries, .getCreator:
+              guard let entityId = entityId else { throw HeroError.invalidURL }
+              return "\(endpoint.request)/\(entityId)?ts=\(currentTimeStamp)&apikey=\(API_KEY)&hash=\(md5Hash)"
+          case .finalURL:
+              guard let finalURL = finalURL else { throw HeroError.invalidURL }
+              return "\(finalURL)?ts=\(currentTimeStamp)&apikey=\(API_KEY)&hash=\(md5Hash)"
+          case .clearlyURL:
+              guard let finalURL = finalURL else { throw HeroError.invalidURL }
+              return finalURL
+          }
       }
       
-      func fetchHeroData(heroItem: HeroRO, completion: @escaping (Result<HeroModel, Error>) -> Void) {
-          let path = "\(APIType.getHero.request)/\(heroItem.id)?ts=\(currentTimeStamp)&apikey=\(API_KEY)&hash=\(md5Hash)"
-          let urlString = String(format: path)
+      func performRequest<T: Decodable>(
+          from urlString: String,
+          modelType: T.Type
+      ) async throws -> T {
+          guard let url = URL(string: urlString) else { throw HeroError.invalidURL }
           
-          AF.request(urlString)
-              .validate()
-              .responseDecodable(of: ResponseModel.self, queue: .global(), decoder: JSONDecoder()) { (response) in
-                  switch response.result {
-                  case .success(let heroesData):
-                      let model = heroesData.data.results.first ?? mockUpHeroData
-                      completion(.success(model))
-                      break
-                  case .failure(let error):
-                      if let err = self.getHeroError(error: error, data: response.data) {
-                          completion(.failure(err))
-                      } else {
-                          completion(.failure(error))
-                      }
-                      break
-                  }
-              }
+          var request = URLRequest(url: url)
+          request.httpMethod = HTTPMethod.get.rawValue
+          request.addValue("application/json", forHTTPHeaderField: "accept")
+          
+          return try await makeHTTPRequest(for: request, codableModelType: modelType)
       }
       
-      @MainActor func getImageForHero(url: String, imageView: UIImageView) {
+      func makeHTTPRequest<T: Decodable>(
+          for request: URLRequest,
+          codableModelType: T.Type
+      ) async throws -> T {
           do {
-              let realm = try Realm()
-              let cachedImage = realm.objects(CachedImageData.self).filter { $0.url == url }.first
-              
-              if let cachedImage = cachedImage, let imageData = cachedImage.imageData, let image = UIImage(data: imageData) {
-                  imageView.image = image
-                  return
+              let (data, _) = try await URLSession.shared.data(for: request)
+              guard data != notFoundEntityResponseData else { throw HeroError.notFoundEntity }
+              do {
+                  let result = try JSONDecoder().decode(codableModelType, from: data)
+                  return result
+              } catch {
+                  print("data = \(String(decoding: data, as: UTF8.self))")
+                  let errorModel = try JSONDecoder().decode(ResponseFailureModel.self, from: data)
+                  let errorMessage = StringError(errorModel.status)
+                  throw HeroError.parsingFailureModelError(errorMessage)
+              }
+          } catch let error as DecodingError {
+              print("request \(request)")
+              throw HeroError.parsingError(error)
+          } catch let error as URLError {
+              print("request \(request)")
+              switch error.code {
+              case .notConnectedToInternet:
+                  throw HeroError.noInternetConnection
+              case .timedOut:
+                  throw HeroError.timeout
+              default:
+                  throw HeroError.otherNetworkError(error)
               }
           } catch {
-              print("Error saving image to Realm cache: \(error)")
-              imageView.image = MockUpImage
+              print("request1 \(request)")
+              guard let error = error as? HeroError else { throw HeroError.otherNetworkError(error) }
+              throw error
+          }
+      }
+      
+      // MARK: - getting Image funcs
+      func getImage(url: String) async throws -> UIImage {
+          if url == "entity." || url == "entity" {
+              return emptyEntityImage
+          } else if url == "hero." || url == "hero" || url == "\(imageNotAvailable).jpg" {
+              return MockUpImage
+          }
+          
+          if let cachedImage = await RealmManager.shared.fetchCachedImage(url: url),
+              let imageData = cachedImage.imageData,
+              let image = UIImage(data: imageData) {
+              return image
           }
           
           // if image isn't cached
-          getImageForHeroFromNet(url: url, imageView: imageView)
+          return try await getImageForHeroFromNet(url: url)
       }
       
-      // MARK: - private func
-      
-      @MainActor private func getImageForHeroFromNet(url: String, imageView: UIImageView) {
-          let url = URL(string: url)
-          let processor = RoundCornerImageProcessor(cornerRadius: 20)
-          let indicatorStyle = UIActivityIndicatorView.Style.large
-          let indicator = UIActivityIndicatorView(style: indicatorStyle)
+      private func getImageForHeroFromNet(url: String) async throws -> UIImage {
+          guard let url = URL(string: url) else { throw HeroError.invalidURL }
           
-          indicator.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-          imageView.kf.indicatorType = .activity
-          (imageView.kf.indicator?.view as? UIActivityIndicatorView)?.color = .white
+          var request = URLRequest(url: url)
+          request.httpMethod = "GET"
+          request.allHTTPHeaderFields = ["Accept": "application/json,image/png,image/jpeg,image/gif"]
           
-          imageView.kf.setImage(with: url, options: [.processor(processor), .transition(.fade(0.2))]){ result in
-              switch result {
-              case .success(let imageResult):
-                  imageView.image = imageResult.image
-                  
-                  let cachedImageData = CachedImageData(
-                      url: url?.absoluteString ?? "",
-                      imageData: imageResult.image.pngData()
-                  )
-                  
-                  do {
+          let (data, _) = try await URLSession.shared.data(for: request)
+          
+          if let uiImage = UIImage(data: data) {
+              let cachedImageData = CachedImageData(
+                  url: url.absoluteString,
+                  imageData: data
+              )
+              
+              do {
+                  try await MainActor.run {
                       let realm = try Realm()
                       
                       try realm.write {
                           realm.add(cachedImageData, update: .modified)
                       }
-                      print("Downloaded and cached image for \(String(describing: url))")
-                  } catch {
-                      print("Error saving image to Realm cache: \(error)")
                   }
-                  break
-              case .failure(let error):
-                  imageView.image = MockUpImage
-                  print("Error loading image: \(error)")
-                  
-                  DispatchQueue.main.async {
-                      LoadingIndicator.stopLoading()
-                  }
-                  break
+              } catch {
+                  throw HeroError.cashingFailed("Error saving image to Realm cache: \(error)".errorString)
               }
-          }
-      }
-      
-      private func getHeroError(error: AFError, data: Data?) -> Error? {
-          if let data = data,
-             let failure = try? JSONDecoder().decode(ResponseFailureModel.self, from: data) {
-              let message = failure.message
-              return HeroError.custom(description: message)
+              return uiImage
           } else {
-              return nil
+              print("Error loading image: \(url)")
+              return emptyEntityImage
           }
       }
       
+      // MARK: - private utility func
       private func MD5(string: String) -> String {
           let digest = Insecure.MD5.hash(data: string.data(using: .utf8) ?? Data())
           return digest.map {
               String(format: "%02hhx", $0)
           }.joined()
-      }
-  }
-  
-  final class APIMockManager: ApiServiceProtocol {
-      
-      public static let shared = APIMockManager()
-      
-      func fetchHeroesData(from offset: Int, completion: @escaping (Result<Heroes, any Error>) -> Void) {
-          let response = [
-              HeroModel(id: 1, name: "Deadpool", heroDescription: "This is the craziest hero in Marvel spacs!", thumbnail: ThumbnailModel(path: "Deadpool", extension: "")),
-              HeroModel(id: 2, name: "Iron Man", heroDescription: "Robert is a clever guy", thumbnail: ThumbnailModel(path: "Iron Man", extension: ""))
-          ]
-          completion(.success(response))
-      }
-      
-      func fetchHeroData(heroItem: HeroRO, completion: @escaping (Result<HeroModel, any Error>) -> Void) {
-          let heroInfo = HeroModel(id: heroItem.id, name: heroItem.name, heroDescription: heroItem.heroDescription, thumbnail: ThumbnailModel(thumbRO: heroItem.thumbnail ?? ThumbnailRO()))
-          completion(.success(heroInfo))
-      }
-      
-      func getImageForHero(url: String, imageView: UIImageView) {
-          if url == "Deadpool." {
-              imageView.image = UIImage(named: "deadPool")
-          } else if url == "Iron Man." {
-              imageView.image = UIImage(named: "ironMan")
-          } else {
-              imageView.image = UIImage(named: "mockup")
-          }
       }
   }
   ```
@@ -325,7 +300,6 @@
           let txt = UILabel()
           txt.translatesAutoresizingMaskIntoConstraints = false
           txt.font = UIFont(name: Font.InterBold, size: 28)
-          txt.textColor = .white
           txt.textAlignment = .center
           txt.numberOfLines = 2
           return txt
@@ -368,7 +342,7 @@
       private let activityIndicator: UIActivityIndicatorView = {
           let activityIndicator = UIActivityIndicatorView(style: .medium)
           activityIndicator.hidesWhenStopped = true
-          activityIndicator.color = loaderColor
+          activityIndicator.color = UIColor.themeRed
           activityIndicator.translatesAutoresizingMaskIntoConstraints = false
           return activityIndicator
       }()
@@ -388,19 +362,21 @@
           super.viewDidLoad()
           
           setupUI()
-          viewModel.fetchHeroesData(into: collectionView)
+          executeWithErrorHandling {
+              try await self.viewModel.fetchHeroesData(into: self.collectionView)
+          }
           
-          self.collectionView.dataSource = self
-          self.collectionView.delegate = self
+          collectionView.dataSource = self
+          collectionView.delegate = self
       }
       
       // MARK: - UI functions
       
       private func setupUI() {
           
-          box.backgroundColor = bgColor
+          box.backgroundColor = UIColor.bgColor
           
-          self.navigationController?.setNavigationBarHidden(true, animated: false)
+          navigationController?.setNavigationBarHidden(true, animated: false)
           
           marvelLogo.image = Logo
           
@@ -416,28 +392,27 @@
           
           view.addSubview(box)
           box.snp.makeConstraints{
-              $0.verticalEdges.equalTo(self.view.safeAreaLayoutGuide.snp.verticalEdges)
-              $0.horizontalEdges.equalToSuperview()
+              $0.edges.equalTo(view.safeAreaLayoutGuide.snp.edges)
           }
           
           triangleView.backgroundColor = .clear
           box.addSubview(triangleView)
           triangleView.snp.makeConstraints{
-              $0.top.equalTo(self.box.snp.top).offset(self.view.frame.height * 0.25)
+              $0.height.equalToSuperview().multipliedBy(0.75)
               $0.bottom.horizontalEdges.equalToSuperview()
           }
           
           box.addSubview(marvelLogo)
           marvelLogo.snp.makeConstraints{
-              $0.top.equalTo(self.box.snp.top).offset(20)
-              $0.width.equalTo(self.box.snp.width).multipliedBy(0.4)
-              $0.height.equalTo(self.box.snp.height).multipliedBy(0.09)
+              $0.top.equalTo(box.snp.top).offset(20)
+              $0.width.equalTo(box.snp.width).multipliedBy(0.4)
+              $0.height.equalTo(box.snp.height).multipliedBy(0.09)
               $0.centerX.equalToSuperview()
           }
           
           box.addSubview(chooseHeroText)
           chooseHeroText.snp.makeConstraints{
-              $0.top.equalTo(self.marvelLogo.snp.bottom).offset(20)
+              $0.top.equalTo(marvelLogo.snp.bottom).offset(20)
               $0.width.equalToSuperview()
           }
           
@@ -448,13 +423,15 @@
           }
       }
       
-      private func moveFocusOnFirstItem() {
-          if customLayout.currentPage == 0 {
-              let indexPath = IndexPath(item: 0, section: 0)
-              collectionView.scrollToItem(at: indexPath, at: .centeredHorizontally, animated: true)
-              
-              setupCell()
-          }
+      private func moveFocusOnItem() {
+          let itemCount = collectionView.numberOfItems(inSection: 0)
+          var (currentPage, _) = UDManager.shared.getCurrentPosition()
+          currentPage = currentPage > itemCount ? itemCount - 1 : currentPage
+          
+          let indexPath = IndexPath(item: currentPage, section: 0)
+          collectionView.scrollToItem(at: indexPath, at: .centeredHorizontally, animated: true)
+          
+          setupCell(at: currentPage)
       }
       
       @objc func pull2refresh(_ gesture: UIPanGestureRecognizer) {
@@ -473,7 +450,9 @@
           
           if gesture.state == .ended {
               if newY > maxPullDownDistance {
-                  viewModel.fetchHeroesData(into: collectionView, needRefresh: true)
+                  executeWithErrorHandling {
+                      try await self.viewModel.fetchHeroesData(into: self.collectionView, needRefresh: true)
+                  }
               }
               UIView.animate(withDuration: 0.3) {
                   self.box.transform = CGAffineTransform.identity
@@ -503,13 +482,12 @@
           
           cell.configure(viewModel: HeroCollectionViewCellViewModel(hero: HeroRO(heroData: hero)))
           
-          moveFocusOnFirstItem()
+          moveFocusOnItem()
           
           return cell
       }
       
       func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-          
           let hero = viewModel.dataSource[indexPath.row]
           
           if indexPath.item == customLayout.currentPage {
@@ -527,8 +505,11 @@
   
   extension HeroListViewController: UICollectionViewDelegateFlowLayout {
       
-      func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
-          
+      func collectionView(
+          _ collectionView: UICollectionView,
+          layout collectionViewLayout: UICollectionViewLayout,
+          sizeForItemAt indexPath: IndexPath
+      ) -> CGSize {
           CGSize(
               width: collectionView.frame.width * 0.7,
               height: collectionView.frame.height * 0.75
@@ -549,18 +530,19 @@
               
               if lastRow >= totalRows - 1 {
                   if collectionView.contentOffset.x > 0 {
-                      viewModel.fetchHeroesData(into: collectionView, needsLoadMore: true)
+                      executeWithErrorHandling {
+                          try await self.viewModel.fetchHeroesData(into: self.collectionView, needsLoadMore: true)
+                      }
                   }
               }
           }
       }
       
-      private func setupCell() {
-          let indexPath = IndexPath(item: customLayout.currentPage, section: 0)
+      private func setupCell(at indexPathRow: Int? = nil) {
+          let indexPath = IndexPath(item: indexPathRow == nil ? customLayout.currentPage : indexPathRow!, section: 0)
           guard let cell = collectionView.cellForItem(at: indexPath) as? HeroCollectionViewCell else { return }
   
           updateTriangleViewColor(didLoadImage: cell.heroImage)
-  
           transformCell(cell)
       }
       
@@ -607,3 +589,6 @@
 ## Автор
 
 Иванов Сергей 2024.
+
+## Ссылки
+Код проекта находится [здесь](https://github.com/ivn-srg/MarvelHeroesiOSApp/tree/develop)
